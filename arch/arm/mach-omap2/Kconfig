@@ -365,6 +365,18 @@ config OMAP_ALLOW_OSWR
 	  Which means the Logic of power domains can be lost now
 	  unlike the CSWR wherein the logic is retained
 
+config VOLTAGE_CONTROL
+	bool "Enable MPU Votlage Control on OMAP443x"
+	default y
+	help
+	  Enables MPU voltage control on OMAP443x
+
+config SR3_INIT
+	bool "Enable SmartReflex SR3 Driver on OMAP443x"
+	default n
+	help
+	  Enables SmartReflex SR3 Driver on OMAP443x
+
 config OMAP_FIQ_DEBUGGER
 	bool "Enable the serial FIQ debugger on OMAP"
 	default y
