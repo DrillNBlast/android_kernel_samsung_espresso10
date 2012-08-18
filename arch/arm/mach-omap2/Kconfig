@@ -367,13 +367,13 @@ config OMAP_ALLOW_OSWR
 
 config VOLTAGE_CONTROL
 	bool "Enable MPU Votlage Control on OMAP443x"
-	default y
+	default n
 	help
 	  Enables MPU voltage control on OMAP443x
 
 config SR3_INIT
 	bool "Enable SmartReflex SR3 Driver on OMAP443x"
-	default n
+	default y
 	help
 	  Enables SmartReflex SR3 Driver on OMAP443x
 
