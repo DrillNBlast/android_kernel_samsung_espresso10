@@ -379,7 +379,7 @@ config SR3_INIT
 
 config GPUOC
 	bool "Enable GPU OC to 384MHz on OMAP443x"
-	default y
+	default n
 	help
 	  Enables GPU OC to 384MHz on OMAP443x
 
