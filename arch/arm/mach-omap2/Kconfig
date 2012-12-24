@@ -373,15 +373,16 @@ config VOLTAGE_CONTROL
 
 config SR3_INIT
 	bool "Enable SmartReflex SR3 Driver on OMAP443x"
-	default y
+	depends on !GPUOC && !VOLTAGE_CONTROL
+	default n
 	help
 	  Enables SmartReflex SR3 Driver on OMAP443x
 
 config GPUOC
-	bool "Enable GPU OC to 384MHz on OMAP443x"
-	default n
+	bool "Enable GPU OC to 384MHz or 512MHz on OMAP443x"
+	default y
 	help
-	  Enables GPU OC to 384MHz on OMAP443x
+	  Enables GPU OC to 384MHz or 512MHz on OMAP443x
 
 config OMAP_FIQ_DEBUGGER
 	bool "Enable the serial FIQ debugger on OMAP"

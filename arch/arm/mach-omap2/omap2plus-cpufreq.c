@@ -280,6 +280,9 @@ void omap_cpufreq_max_limit_free(unsigned int nId)
 }
 #endif
 
+#ifdef CONFIG_GPUOC
+static int oc_val;
+#endif
 
 static unsigned int omap_getspeed(unsigned int cpu)
 {
@@ -668,6 +671,51 @@ struct freq_attr omap_cpufreq_attr_screen_off_freq = {
 	.store = store_screen_off_freq,
 };
 
+#ifdef CONFIG_GPUOC
+/*
+ * Variable GPU OC - sysfs interface for cycling through different GPU top speeds
+ * Author: imoseyon@gmail.com
+ *
+*/
+static ssize_t show_gpu_oc(struct cpufreq_policy *policy, char *buf)
+{
+	return sprintf(buf, "%d\n", oc_val);
+}
+static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size_t size)
+{
+	int prev_oc, ret1, ret2; 
+        struct device *dev;
+	unsigned long gpu_freqs[3] = {307200000,384000000,512000000};
+
+	prev_oc = oc_val;
+	if (prev_oc < 0 || prev_oc > 2) {
+		// shouldn't be here
+		pr_info("[imoseyon] gpu_oc error - bailing\n");	
+		return size;
+	}
+	
+	sscanf(buf, "%d\n", &oc_val);
+	if (oc_val < 0 ) oc_val = 0;
+	if (oc_val > 2 ) oc_val = 2;
+	if (prev_oc == oc_val) return size;
+
+        dev = omap_hwmod_name_get_dev("gpu");
+        ret1 = opp_disable(dev, gpu_freqs[prev_oc]);
+        ret2 = opp_enable(dev, gpu_freqs[oc_val]);
+        pr_info("[imoseyon] gpu top speed changed from %lu to %lu (%d,%d)\n", 
+		gpu_freqs[prev_oc], gpu_freqs[oc_val], ret1, ret2);
+	
+	return size;
+}
+
+static struct freq_attr gpu_oc = {
+	.attr = {.name = "gpu_oc", .mode=0666,},
+	.show = show_gpu_oc,
+	.store = store_gpu_oc,
+};
+#endif
+
+
 #ifdef CONFIG_VOLTAGE_CONTROL
 /*
  * OMAP4 MPU voltage control via cpufreq by Michael Huang (coolbho3k)
@@ -696,12 +744,6 @@ static ssize_t show_uv_mv_table(struct cpufreq_policy *policy, char *buf)
 	char *out = buf;
 	struct opp *opp_cur;
 
-#if 0
-	/* debugging purposes */
-	struct voltagedomain *mpu_voltdm;
-	mpu_voltdm = voltdm_lookup("mpu");
-#endif
-
 	/* Reverse order sysfs entries for consistency */
 	while(freq_table[i].frequency != CPUFREQ_TABLE_END)
                 i++;
@@ -710,19 +752,14 @@ static ssize_t show_uv_mv_table(struct cpufreq_policy *policy, char *buf)
 	for(i--; i >= 0; i--) {
 		if(freq_table[i].frequency != CPUFREQ_ENTRY_INVALID) {
 			/* Find the opp for this frequency */
+			rcu_read_lock();
 			opp_cur = opp_find_freq_exact(mpu_dev,
 				freq_table[i].frequency*1000, true);
+			rcu_read_unlock();
 			/* sprint the voltage (mV)/frequency (MHz) pairs */
 			volt_cur = opp_cur->u_volt;
 			out += sprintf(out, "%umhz: %lu mV\n",
 				freq_table[i].frequency/1000, volt_cur/1000);
-
-			/* debugging purposes */
-#if 0
-			pr_info("nominal voltage: %u\n", mpu_voltdm->curr_volt->volt_nominal);
-			pr_info("calibrated voltage: %u\n", mpu_voltdm->curr_volt->volt_calibrated);
-			pr_info("dynamic voltage: %u\n", mpu_voltdm->curr_volt->volt_dynamic_nominal);
-#endif
 		}
 	}
         return out-buf;
@@ -732,86 +769,105 @@ static ssize_t store_uv_mv_table(struct cpufreq_policy *policy,
 	const char *buf, size_t count)
 {
 	int i = 0;
-	unsigned long volt_cur;
+	int j;
+	unsigned long volt_cur, volt_old;
 	int ret;
 	char size_cur[16];
 	struct opp *opp_cur;
 	struct voltagedomain *mpu_voltdm;
+	struct omap_volt_data *vdata;
+	unsigned int policymin, policymax;
 
 	mpu_voltdm = voltdm_lookup("mpu");
-
-	/* critical section -- begin */
-	mutex_lock(&omap_cpufreq_lock);
-
 
 	while(freq_table[i].frequency != CPUFREQ_TABLE_END)
 		i++;
 
-	omap_sr_disable_reset_volt(mpu_voltdm);
-
+	policymin = policy->min;
+	policymax = policy->max;
+ 
 	for(i--; i >= 0; i--) {
 		if(freq_table[i].frequency != CPUFREQ_ENTRY_INVALID) {
 			ret = sscanf(buf, "%lu", &volt_cur);
 			if(ret != 1) {
 				return -EINVAL;
 			}
+			policy->cur = policy->max = policy->min = freq_table[i].frequency;
+        		ret = omap_device_scale(mpu_dev, mpu_dev, freq_table[i].frequency);
 
 			/* Alter voltage. First do it in our opp */
+			rcu_read_lock();
 			opp_cur = opp_find_freq_exact(mpu_dev,
 				freq_table[i].frequency*1000, true);
-
 			opp_cur->u_volt = volt_cur*1000;
+			rcu_read_unlock();
 
-			/* find core voltage dependency */
-			switch (mpu_voltdm->vdd->dep_vdd_info->
-				dep_table[i].dep_vdd_volt) {
-
-				/* limit mpu voltage to min core voltage to prevent DVFS stalls */
-				case MIN_OMAP443x_VDD_CORE_OPP50_UV:
-					if (opp_cur->u_volt < MIN_OMAP443x_VDD_CORE_OPP50_UV)
-						opp_cur->u_volt = MIN_OMAP443x_VDD_CORE_OPP50_UV;
-					break;
-				case MIN_OMAP443x_VDD_CORE_OPP100_UV:
-					if (opp_cur->u_volt < MIN_OMAP443x_VDD_CORE_OPP100_UV)
-						opp_cur->u_volt = MIN_OMAP443x_VDD_CORE_OPP100_UV;
-					break;
-				case MIN_OMAP443x_VDD_CORE_OPP100_OV_UV:
-					if (opp_cur->u_volt < MIN_OMAP443x_VDD_CORE_OPP100_OV_UV)
-						opp_cur->u_volt = MIN_OMAP443x_VDD_CORE_OPP100_OV_UV;
-					break;
-				default:
-					pr_err("bad voltage value %lu\n", opp_cur->u_volt);
-					goto bad_uv_err;
-			}
-
+			/* Then we need to alter voltage domains */
+			/* Save our old voltage */
+			volt_old = mpu_voltdm->vdd->volt_data[i].volt_nominal;
 			/* Change our main and dependent voltage tables */
 			mpu_voltdm->vdd->
-				volt_data[i].volt_nominal = opp_cur->u_volt;
+				volt_data[i].volt_nominal = volt_cur*1000;
 			mpu_voltdm->vdd->dep_vdd_info->
-				dep_table[i].main_vdd_volt = opp_cur->u_volt;
+				dep_table[i].main_vdd_volt = volt_cur*1000;
 
-			/* reset calibrated value */
-			mpu_voltdm->vdd->
-				volt_data[i].volt_calibrated = 0;
+			if (mpu_voltdm->vdd->dep_vdd_info->
+				dep_table[i].dep_vdd_volt > volt_cur*1000) {
+				// imoseyon - ugly hack (fix later! yeah right)
+				if (volt_cur < 1127) {
+					if (volt_cur < 962) 
+					   mpu_voltdm->vdd->dep_vdd_info->
+						dep_table[i].dep_vdd_volt = 650000;
+					else
+					   mpu_voltdm->vdd->dep_vdd_info->
+						dep_table[i].dep_vdd_volt = 962000;
+				} else mpu_voltdm->vdd->dep_vdd_info->
+						dep_table[i].dep_vdd_volt = 1127000;
+			}
+
+			/* Alter current voltage in voltdm, if appropriate */
+			/* imoseyon - don't need it anymore
+			if(volt_old == mpu_voltdm->curr_volt->volt_nominal) {
+				mpu_voltdm->curr_volt->volt_nominal = volt_cur*1000;
+			}
+			*/
 
 			/* Non-standard sysfs interface: advance buf */
 			ret = sscanf(buf, "%s", size_cur);
 			buf += (strlen(size_cur)+1);
+
+			// imoseyon - force smartreflex to recalibrate based on new voltages
+			if (freq_table[i].frequency <= 1200000 && 
+				freq_table[i].frequency >= policymin) {
+				vdata = omap_voltage_get_curr_vdata(mpu_voltdm);
+				if (!vdata) {
+				  pr_err("%s: unable to find current volt for vdd_%s\n", 
+					__func__, mpu_voltdm->name);
+				} else {
+			         //for (j=0; j<2; j++)
+				  // if nominal volt is too large bail
+				  if (volt_old > mpu_voltdm->curr_volt->volt_nominal) {
+				    omap_sr_disable(mpu_voltdm);
+        			    ret = omap_device_scale(mpu_dev, mpu_dev, freq_table[i].frequency);
+				    omap_voltage_calib_reset(mpu_voltdm);
+				    voltdm_reset(mpu_voltdm);
+				    omap_sr_enable(mpu_voltdm, vdata);
+				    pr_info("calibration reset for %s at %d.\n",  
+					mpu_voltdm->name, policy->cur);
+				    //msleep(1000);
+				    //pr_info("[imoseyon] calibration should have finished.\n\n");
+				  } else
+				    pr_info("nominal volt too high - bailing!\n");
+				}
+			}
 		}
 		else {
 			pr_err("%s: frequency entry invalid for %u\n",
 				__func__, freq_table[i].frequency);
 		}
 	}
-
-bad_uv_err:
-	omap_sr_enable(mpu_voltdm, omap_voltage_get_curr_vdata(mpu_voltdm));
-
-	/* critical section -- end */
-	mutex_unlock(&omap_cpufreq_lock);
-
-	pr_warn("OMAP443x: User voltage control activated!\n");
-
+	policy->min = policymin;
+	policy->max = policymax;
 	return count;
 }
 
@@ -825,6 +881,9 @@ static struct freq_attr omap_uv_mv_table = {
 static struct freq_attr *omap_cpufreq_attr[] = {
 	&cpufreq_freq_attr_scaling_available_freqs,
 	&omap_cpufreq_attr_screen_off_freq,
+#ifdef CONFIG_GPUOC
+	&gpu_oc,
+#endif
 #ifdef CONFIG_VOLTAGE_CONTROL
 	&omap_uv_mv_table,
 #endif
@@ -880,6 +939,9 @@ static struct platform_device omap_cpufreq_device = {
 static int __init omap_cpufreq_init(void)
 {
 	int ret;
+#ifdef CONFIG_GPUOC
+	oc_val = 0;
+#endif
 
 	if (cpu_is_omap24xx())
 		mpu_clk_name = "virt_prcm_set";
